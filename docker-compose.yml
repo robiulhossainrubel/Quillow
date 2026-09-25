@@ -1,0 +1,75 @@
+services:
+  # ====================================================
+  # 1. PostgreSQL Database
+  # ====================================================
+  quillow-db:
+    image: postgres:17-alpine
+    container_name: quillow-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: QuilllowDb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d QuilllowDb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - quillow-network
+
+  # ====================================================
+  # 2. .NET 10 Hot Chocolate GraphQL Web API
+  # ====================================================
+  quillow-api:
+    build:
+      context: .
+      dockerfile: src/Quillow.API/Dockerfile
+    container_name: quillow-backend
+    restart: always
+    depends_on:
+      quillow-db:
+        condition: service_healthy
+    ports:
+      - "5049:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConnectionStrings__DefaultConnection=Host=quillow-db;Port=5432;Database=QuilllowDb;Username=postgres;Password=postgrespassword
+      - Jwt__Secret=Quillow_Super_Secure_JWT_Secret_Key_2026_DotNet10_HotChocolate_32Chars!
+      - Jwt__Issuer=QuillowAPI
+      - Jwt__Audience=QuillowClient
+    volumes:
+      - api-uploads:/app/wwwroot/uploads
+    networks:
+      - quillow-network
+
+  # ====================================================
+  # 3. Next.js 15 + Apollo Client Frontend
+  # ====================================================
+  quillow-web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: quillow-frontend
+    restart: always
+    depends_on:
+      - quillow-api
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_GRAPHQL_HTTP_URL=http://localhost:5049/graphql
+      - NEXT_PUBLIC_GRAPHQL_WS_URL=ws://localhost:5049/graphql
+    networks:
+      - quillow-network
+
+networks:
+  quillow-network:
+    driver: bridge
+
+volumes:
+  pgdata:
+  api-uploads:

@@ -254,6 +254,59 @@ export const ADD_COMMENT_MUTATION = gql`
   }
 `;
 
+// ========== PHASE 7: MEDIA OPERATIONS ==========
+
+export const GET_MEDIA = gql`
+  query GetMedia {
+    media {
+      id
+      fileName
+      url
+      mimeType
+      size
+      createdAt
+      uploadedBy {
+        displayName
+      }
+    }
+  }
+`;
+
+export const UPLOAD_MEDIA_MUTATION = gql`
+  mutation UploadMedia($file: Upload!, $postId: UUID) {
+    uploadMedia(file: $file, postId: $postId) {
+      id
+      fileName
+      url
+      mimeType
+      size
+    }
+  }
+`;
+
+// ========== PHASE 5: OFFSET PAGINATION ==========
+
+export const GET_POSTS_OFFSET = gql`
+  query GetPostsOffset($skip: Int, $take: Int) {
+    postsOffset(skip: $skip, take: $take) {
+      items {
+        id
+        title
+        slug
+        excerpt
+        createdAt
+        author {
+          displayName
+        }
+      }
+      totalCount
+      skip
+      take
+      hasNextPage
+    }
+  }
+`;
+
 // ========== SUBSCRIPTIONS ==========
 
 export const ON_POST_PUBLISHED = gql`

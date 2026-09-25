@@ -217,7 +217,66 @@ public class Query
             TotalTags: await context.Tags.CountAsync()
         );
     }
+
+    // ========== Media Queries (Phase 7) ==========
+
+    /// <summary>
+    /// সব upload করা media files fetch করা।
+    /// </summary>
+    [UseFiltering]
+    [UseSorting]
+    public async Task<List<Media>> GetMedia(
+        [Service] IDbContextFactory<QuilllowDbContext> contextFactory)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync();
+        return await context.Media
+            .Include(m => m.UploadedBy)
+            .OrderByDescending(m => m.CreatedAt)
+            .ToListAsync();
+    }
+
+    public async Task<Media?> GetMediaById(
+        [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
+        Guid id)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync();
+        return await context.Media
+            .Include(m => m.UploadedBy)
+            .FirstOrDefaultAsync(m => m.Id == id);
+    }
+
+    // ========== Offset Pagination (Phase 5) ==========
+
+    /// <summary>
+    /// GraphQL শেখার পয়েন্ট: OFFSET PAGINATION (Skip & Take)
+    /// </summary>
+    public async Task<PostPaginationResult> GetPostsOffset(
+        [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
+        int skip = 0,
+        int take = 10)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync();
+        var total = await context.Posts.CountAsync();
+        var posts = await context.Posts
+            .OrderByDescending(p => p.CreatedAt)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync();
+
+        return new PostPaginationResult(posts, total, skip, take, skip + take < total);
+    }
 }
+
+/// <summary>
+/// Offset Pagination payload
+/// </summary>
+public record PostPaginationResult(
+    List<Post> Items,
+    int TotalCount,
+    int Skip,
+    int Take,
+    bool HasNextPage
+);
 
 /// <summary>
 /// Blog statistics — computed query result type।

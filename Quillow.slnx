@@ -5,4 +5,7 @@
     <Project Path="src/Quillow.Infrastructure/Quillow.Infrastructure.csproj" />
     <Project Path="src/Quillow.Services/Quillow.Services.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Quillow.Tests/Quillow.Tests.csproj" />
+  </Folder>
 </Solution>

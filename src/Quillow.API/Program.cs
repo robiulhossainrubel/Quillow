@@ -9,6 +9,7 @@ using Quillow.API.GraphQL.Types;
 using Quillow.Core.Entities;
 using Quillow.Infrastructure.Data;
 using HotChocolate.Authorization;
+using HotChocolate.Types;
 using Quillow.Services.Auth;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -54,7 +55,22 @@ builder.Services
         Console.WriteLine($"[GRAPHQL_ERROR] {error.Message} | {error.Exception?.Message} | {error.Exception?.InnerException?.Message}");
         return error;
     })
-    .ModifyRequestOptions(opt => opt.IncludeExceptionDetails = builder.Environment.IsDevelopment())
+    // 🛡️ Phase 8: Execution Timeout & Dev Error Details
+    .ModifyRequestOptions(opt =>
+    {
+        opt.IncludeExceptionDetails = builder.Environment.IsDevelopment();
+        opt.ExecutionTimeout = TimeSpan.FromSeconds(30);
+    })
+    // 🛡️ Phase 8: Query Depth Limiting (Prevents malicious deeply nested circular queries)
+    .AddMaxExecutionDepthRule(15)
+    // 🛡️ Phase 8: Query Complexity & Cost Analyzer
+    .AddCostAnalyzer()
+    .ModifyCostOptions(opt =>
+    {
+        opt.MaxFieldCost = 1000;
+        opt.MaxTypeCost = 1000;
+        opt.EnforceCostLimits = true;
+    })
 
     // Query — data পড়ার জন্য
     .AddQueryType<Query>()
@@ -73,6 +89,9 @@ builder.Services
     .AddType<TagType>()
     .AddType<LikeType>()
     .AddType<MediaType>()
+
+    // 📁 Phase 7: Multipart File Upload scalar
+    .AddType<UploadType>()
 
     // 🆕 Union Type — Search result (Post | User | Category)
     .AddType<SearchResultType>()
@@ -106,6 +125,14 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// Ensure wwwroot and uploads directory exist
+var webRoot = app.Environment.WebRootPath ?? System.IO.Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
+var uploadsDir = System.IO.Path.Combine(webRoot, "uploads");
+if (!Directory.Exists(uploadsDir))
+{
+    Directory.CreateDirectory(uploadsDir);
+}
+
 // ========== Database Migration & Seed ==========
 // Development এ automatically migration run করবে ও seed data দেবে
 using (var scope = app.Services.CreateScope())
@@ -118,6 +145,9 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseCors();
+
+// 📁 Serve uploaded media files statically (Phase 7)
+app.UseStaticFiles();
 
 // 🆕 WebSocket support — Subscription এর জন্য দরকার!
 app.UseWebSockets();

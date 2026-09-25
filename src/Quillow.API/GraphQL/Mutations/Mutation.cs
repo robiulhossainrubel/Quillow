@@ -2,6 +2,8 @@ using System.Security.Claims;
 using System.Text.RegularExpressions;
 using HotChocolate.Authorization;
 using HotChocolate.Subscriptions;
+using HotChocolate.Types;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Quillow.API.GraphQL.Subscriptions;
 using Quillow.API.GraphQL.Types;
@@ -473,6 +475,93 @@ public class Mutation
         await context.SaveChangesAsync();
 
         return tag;
+    }
+
+    // ========== Media / File Upload Mutations (Phase 7) ==========
+
+    /// <summary>
+    /// GraphQL শেখার পয়েন্ট: MULTIPART FILE UPLOAD MUTATION
+    /// 
+    /// Upload scalar (IFile) দিয়ে file upload গ্রহণ করে wwwroot/uploads এ সংরক্ষণ
+    /// এবং Media entity হিসেবে database এ রেকর্ড রাখা।
+    /// </summary>
+    public async Task<Media> UploadMedia(
+        [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
+        [Service] IWebHostEnvironment env,
+        IFile file,
+        ClaimsPrincipal? claimsPrincipal = null,
+        Guid? postId = null)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync();
+
+        // Get authenticated user ID or fallback to first admin / demo user
+        var currentUserId = claimsPrincipal?.GetUserId();
+        if (currentUserId == null)
+        {
+            var defaultUser = await context.Users.FirstOrDefaultAsync();
+            currentUserId = defaultUser?.Id ?? Guid.NewGuid();
+        }
+
+        var webRoot = env.WebRootPath ?? System.IO.Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
+        var uploadsFolder = System.IO.Path.Combine(webRoot, "uploads");
+
+        if (!Directory.Exists(uploadsFolder))
+        {
+            Directory.CreateDirectory(uploadsFolder);
+        }
+
+        var ext = System.IO.Path.GetExtension(file.Name);
+        var safeFileName = $"{Guid.NewGuid():N}{ext}";
+        var destinationPath = System.IO.Path.Combine(uploadsFolder, safeFileName);
+
+        await using (var fileStream = System.IO.File.Create(destinationPath))
+        {
+            await file.CopyToAsync(fileStream);
+        }
+
+        var relativeUrl = $"/uploads/{safeFileName}";
+        var media = new Media
+        {
+            FileName = file.Name,
+            Url = relativeUrl,
+            MimeType = file.ContentType ?? "application/octet-stream",
+            Size = file.Length ?? 0,
+            PostId = postId,
+            UploadedById = currentUserId.Value
+        };
+
+        context.Media.Add(media);
+        await context.SaveChangesAsync();
+
+        return media;
+    }
+
+    /// <summary>
+    /// Upload করা media file এবং database রেকর্ড ডিলিট করা।
+    /// </summary>
+    [Authorize]
+    public async Task<bool> DeleteMedia(
+        [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
+        [Service] IWebHostEnvironment env,
+        Guid id,
+        ClaimsPrincipal? claimsPrincipal = null)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync();
+        var media = await context.Media.FindAsync(id);
+        if (media == null) return false;
+
+        var webRoot = env.WebRootPath ?? System.IO.Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
+        var uploadsFolder = System.IO.Path.Combine(webRoot, "uploads");
+        var filePath = System.IO.Path.Combine(uploadsFolder, System.IO.Path.GetFileName(media.Url));
+
+        if (System.IO.File.Exists(filePath))
+        {
+            try { System.IO.File.Delete(filePath); } catch { /* ignore file locking */ }
+        }
+
+        context.Media.Remove(media);
+        await context.SaveChangesAsync();
+        return true;
     }
 
     // ========== Helper Methods ==========
