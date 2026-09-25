@@ -1,28 +1,31 @@
 using Microsoft.EntityFrameworkCore;
 using Quillow.API.GraphQL.Mutations;
 using Quillow.API.GraphQL.Queries;
+using Quillow.API.GraphQL.Subscriptions;
 using Quillow.API.GraphQL.Types;
+using Quillow.Core.Entities;
 using Quillow.Infrastructure.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // ========== Database Setup ==========
-// PostgreSQL + EF Core connection
 builder.Services.AddPooledDbContextFactory<QuilllowDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // ========== GraphQL Setup (Hot Chocolate) ==========
-// এখানেই সব GraphQL এর magic হয়!
 builder.Services
     .AddGraphQLServer()
 
-    // Query — data পড়ার জন্য (GET এর মতো)
+    // Query — data পড়ার জন্য
     .AddQueryType<Query>()
 
-    // Mutation — data তৈরি/পরিবর্তন/মুছে ফেলার জন্য (POST/PUT/DELETE এর মতো)
+    // Mutation — data পরিবর্তন করার জন্য
     .AddMutationType<Mutation>()
 
-    // Object Types — কোন entity কিভাবে expose হবে
+    // 🆕 Subscription — real-time WebSocket data!
+    .AddSubscriptionType<Subscription>()
+
+    // Object Types
     .AddType<UserType>()
     .AddType<PostType>()
     .AddType<CategoryType>()
@@ -31,10 +34,24 @@ builder.Services
     .AddType<LikeType>()
     .AddType<MediaType>()
 
-    // Built-in features — Hot Chocolate এর power!
-    .AddFiltering()    // where clause: posts(where: { status: { eq: PUBLISHED } })
-    .AddSorting()      // order by: posts(order: { createdAt: DESC })
-    .AddProjections(); // শুধু requested fields ই database থেকে আনবে
+    // 🆕 Union Type — Search result (Post | User | Category)
+    .AddType<SearchResultType>()
+    .AddType<ObjectType<User>>()
+
+    // 🆕 DataLoaders — automatically registered!
+    .AddDataLoader<Quillow.API.GraphQL.DataLoaders.AuthorByIdDataLoader>()
+    .AddDataLoader<Quillow.API.GraphQL.DataLoaders.CategoryByIdDataLoader>()
+    .AddDataLoader<Quillow.API.GraphQL.DataLoaders.CommentsByPostIdDataLoader>()
+    .AddDataLoader<Quillow.API.GraphQL.DataLoaders.LikeCountByPostIdDataLoader>()
+    .AddDataLoader<Quillow.API.GraphQL.DataLoaders.TagsByPostIdDataLoader>()
+
+    // Built-in features
+    .AddFiltering()
+    .AddSorting()
+    .AddProjections()
+
+    // 🆕 In-Memory Pub/Sub for Subscriptions
+    .AddInMemorySubscriptions();
 
 // CORS — frontend (Next.js) থেকে access করার জন্য
 builder.Services.AddCors(options =>
@@ -61,6 +78,9 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseCors();
+
+// 🆕 WebSocket support — Subscription এর জন্য দরকার!
+app.UseWebSockets();
 
 // ========== GraphQL Endpoint ==========
 // এই একটা endpoint এ সব query, mutation, subscription হবে!

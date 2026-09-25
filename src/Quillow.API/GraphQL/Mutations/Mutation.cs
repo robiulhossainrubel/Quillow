@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Quillow.Core.Entities;
 using Quillow.Core.Enums;
 using Quillow.Infrastructure.Data;
+using HotChocolate.Subscriptions;
+using Quillow.API.GraphQL.Subscriptions;
 
 using CoreTag = Quillow.Core.Entities.Tag;
 
@@ -100,6 +102,7 @@ public class Mutation
     /// </summary>
     public async Task<UpdatePostPayload> UpdatePost(
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
+        [Service] ITopicEventSender eventSender,
         Guid id,
         UpdatePostInput input)
     {
@@ -108,6 +111,8 @@ public class Mutation
 
         if (post == null)
             return new UpdatePostPayload(null, [new UserError("Post not found", "NOT_FOUND", "id")]);
+
+        var wasPublished = post.Status == PostStatus.Published;
 
         if (input.Title != null)
         {
@@ -142,6 +147,12 @@ public class Mutation
             .Include(p => p.PostTags).ThenInclude(pt => pt.Tag)
             .FirstAsync(p => p.Id == id);
 
+        // 🔔 যদি post এইমাত্র publish করা হয়, তাহলে subscriber-দের notify করি
+        if (!wasPublished && updatedPost.Status == PostStatus.Published)
+        {
+            await eventSender.SendAsync("PostPublished", updatedPost);
+        }
+
         return new UpdatePostPayload(updatedPost, null);
     }
 
@@ -168,6 +179,7 @@ public class Mutation
 
     public async Task<AddCommentPayload> AddComment(
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
+        [Service] ITopicEventSender eventSender,
         AddCommentInput input)
     {
         await using var context = await contextFactory.CreateDbContextAsync();
@@ -192,6 +204,9 @@ public class Mutation
             .Include(c => c.Post)
             .FirstAsync(c => c.Id == comment.Id);
 
+        // 🔔 Subscription event publish! Subscribe করা সব client কে notify করবে
+        await eventSender.SendAsync($"CommentAdded_{input.PostId}", createdComment);
+
         return new AddCommentPayload(createdComment, null);
     }
 
@@ -202,6 +217,7 @@ public class Mutation
     /// </summary>
     public async Task<ToggleLikePayload> ToggleLike(
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
+        [Service] ITopicEventSender eventSender,
         Guid postId,
         Guid userId)
     {
@@ -210,16 +226,30 @@ public class Mutation
         var existingLike = await context.Likes
             .FirstOrDefaultAsync(l => l.PostId == postId && l.UserId == userId);
 
+        var user = await context.Users.FindAsync(userId);
+        var userDisplayName = user?.DisplayName ?? "Unknown";
+
         if (existingLike != null)
         {
             context.Likes.Remove(existingLike);
             await context.SaveChangesAsync();
+            var totalLikes = await context.Likes.CountAsync(l => l.PostId == postId);
+
+            // 🔔 Like subscription event
+            await eventSender.SendAsync($"PostLiked_{postId}",
+                new LikeNotification(postId, userId, userDisplayName, false, totalLikes));
+
             return new ToggleLikePayload(false, "Post unliked");
         }
 
         var like = new Like { PostId = postId, UserId = userId };
         context.Likes.Add(like);
         await context.SaveChangesAsync();
+        var totalLikesCount = await context.Likes.CountAsync(l => l.PostId == postId);
+
+        // 🔔 Like subscription event
+        await eventSender.SendAsync($"PostLiked_{postId}",
+            new LikeNotification(postId, userId, userDisplayName, true, totalLikesCount));
 
         return new ToggleLikePayload(true, "Post liked");
     }
