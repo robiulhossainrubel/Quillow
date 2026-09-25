@@ -1,3 +1,5 @@
+using System.Security.Claims;
+using HotChocolate.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Quillow.API.GraphQL.Types;
 using Quillow.Core.Entities;
@@ -89,6 +91,35 @@ public class Query
     {
         await using var context = await contextFactory.CreateDbContextAsync();
         return await context.Users.FirstOrDefaultAsync(u => u.Id == id);
+    }
+
+    /// <summary>
+    /// GraphQL শেখার পয়েন্ট: [Authorize] দিয়ে Query সুরক্ষিত করা।
+    /// 
+    /// Header এ `Authorization: Bearer <token>` থাকলে
+    /// ClaimsPrincipal থেকে স্বয়ংক্রিয়ভাবে current user এর ডেটা রিটার্ন করবে।
+    /// 
+    /// query {
+    ///   me {
+    ///     id
+    ///     displayName
+    ///     email
+    ///     roles
+    ///   }
+    /// }
+    /// </summary>
+    [Authorize]
+    public async Task<User?> GetMe(
+        ClaimsPrincipal claimsPrincipal,
+        [Service] IDbContextFactory<QuilllowDbContext> contextFactory)
+    {
+        var userId = claimsPrincipal.GetUserId();
+        if (userId == null) return null;
+
+        await using var context = await contextFactory.CreateDbContextAsync();
+        return await context.Users
+            .Include(u => u.UserRoles).ThenInclude(ur => ur.Role)
+            .FirstOrDefaultAsync(u => u.Id == userId.Value);
     }
 
     // ========== Category Queries ==========

@@ -48,9 +48,14 @@ public class UserType : ObjectType<User>
             .ResolveWith<UserResolvers>(r => r.GetPostCount(default!));
 
         descriptor
-            .Field("commentCount")
-            .Description("এই User মোট কতটা comment করেছে")
-            .ResolveWith<UserResolvers>(r => r.GetCommentCount(default!));
+            .Field("roles")
+            .Description("User এর assigned roles")
+            .Resolve(ctx =>
+            {
+                var user = ctx.Parent<User>();
+                return user.UserRoles?.Select(ur => ur.Role?.Name ?? string.Empty).Where(n => !string.IsNullOrEmpty(n)).ToList() 
+                    ?? new List<string>();
+            });
     }
 
     /// <summary>

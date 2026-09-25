@@ -1,10 +1,14 @@
+using System.Security.Claims;
 using System.Text.RegularExpressions;
+using HotChocolate.Authorization;
+using HotChocolate.Subscriptions;
 using Microsoft.EntityFrameworkCore;
+using Quillow.API.GraphQL.Subscriptions;
+using Quillow.API.GraphQL.Types;
 using Quillow.Core.Entities;
 using Quillow.Core.Enums;
 using Quillow.Infrastructure.Data;
-using HotChocolate.Subscriptions;
-using Quillow.API.GraphQL.Subscriptions;
+using Quillow.Services.Auth;
 
 using CoreTag = Quillow.Core.Entities.Tag;
 
@@ -13,36 +17,160 @@ namespace Quillow.API.GraphQL.Mutations;
 /// <summary>
 /// GraphQL শেখার পয়েন্ট: MUTATION — Data তৈরি/পরিবর্তন/মুছে ফেলার জন্য।
 /// 
-/// REST API তে POST, PUT, DELETE ব্যবহার করতে,
-/// GraphQL এ সব কিছু Mutation দিয়ে করা হয়:
-/// 
-/// mutation {
-///   createPost(input: { title: "Hello", content: "World", categoryId: "..." }) {
-///     post { id title slug }
-///     errors { message code }
-///   }
-/// }
+/// Phase 3 Updates:
+/// - Authentication Mutations: Register ও Login (JWT Token generation)
+/// - [Authorize] attribute দিয়ে resolver level protection
+/// - Role-based authorization: [Authorize(Roles = new[] { "Admin" })]
+/// - Current User context: ClaimsPrincipal থেকে স্বয়ংক্রিয়ভাবে User ID উদ্ধার
 /// </summary>
 public class Mutation
 {
+    // ========== Authentication Mutations ==========
+
+    /// <summary>
+    /// নতুন User রেজিস্ট্রেশন করা এবং সাথে সাথে JWT Access Token প্রদান করা।
+    /// </summary>
+    public async Task<AuthPayload> Register(
+        [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
+        [Service] IPasswordHasher passwordHasher,
+        [Service] ITokenService tokenService,
+        RegisterInput input)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync();
+        var errors = new List<UserError>();
+
+        // Validations
+        if (string.IsNullOrWhiteSpace(input.UserName))
+            errors.Add(new UserError("Username is required", "VALIDATION_ERROR", "userName"));
+
+        if (string.IsNullOrWhiteSpace(input.Email) || !input.Email.Contains('@'))
+            errors.Add(new UserError("Valid email is required", "VALIDATION_ERROR", "email"));
+
+        if (string.IsNullOrWhiteSpace(input.Password) || input.Password.Length < 6)
+            errors.Add(new UserError("Password must be at least 6 characters", "VALIDATION_ERROR", "password"));
+
+        if (string.IsNullOrWhiteSpace(input.DisplayName))
+            errors.Add(new UserError("Display name is required", "VALIDATION_ERROR", "displayName"));
+
+        if (errors.Any())
+            return new AuthPayload(null, null, errors);
+
+        // Check if email or username already exists
+        var emailExists = await context.Users.AnyAsync(u => u.Email.ToLower() == input.Email.ToLower());
+        if (emailExists)
+            return new AuthPayload(null, null, [new UserError("Email is already registered", "DUPLICATE_EMAIL", "email")]);
+
+        var userNameExists = await context.Users.AnyAsync(u => u.UserName.ToLower() == input.UserName.ToLower());
+        if (userNameExists)
+            return new AuthPayload(null, null, [new UserError("Username is already taken", "DUPLICATE_USERNAME", "userName")]);
+
+        // Default role: Reader or Author
+        var defaultRole = await context.Roles.FirstOrDefaultAsync(r => r.Name == "Editor")
+            ?? await context.Roles.FirstOrDefaultAsync(r => r.Name == "Reader");
+
+        var user = new User
+        {
+            UserName = input.UserName.Trim(),
+            Email = input.Email.Trim().ToLower(),
+            DisplayName = input.DisplayName.Trim(),
+            Bio = input.Bio?.Trim(),
+            PasswordHash = passwordHasher.HashPassword(input.Password)
+        };
+
+        context.Users.Add(user);
+        await context.SaveChangesAsync();
+
+        var roles = new List<string>();
+        if (defaultRole != null)
+        {
+            context.UserRoles.Add(new UserRole { UserId = user.Id, RoleId = defaultRole.Id });
+            await context.SaveChangesAsync();
+            roles.Add(defaultRole.Name);
+        }
+
+        var token = tokenService.GenerateAccessToken(user, roles);
+        return new AuthPayload(token, user, null);
+    }
+
+    /// <summary>
+    /// User Login — Email ও Password যাচাই করে JWT Token ফেরত দেওয়া।
+    /// </summary>
+    public async Task<AuthPayload> Login(
+        [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
+        [Service] IPasswordHasher passwordHasher,
+        [Service] ITokenService tokenService,
+        LoginInput input)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync();
+
+        if (string.IsNullOrWhiteSpace(input.Email) || string.IsNullOrWhiteSpace(input.Password))
+        {
+            return new AuthPayload(null, null, [
+                new UserError("Email and password are required", "VALIDATION_ERROR")
+            ]);
+        }
+
+        var user = await context.Users
+            .Include(u => u.UserRoles).ThenInclude(ur => ur.Role)
+            .FirstOrDefaultAsync(u => u.Email.ToLower() == input.Email.ToLower());
+
+        if (user == null)
+        {
+            return new AuthPayload(null, null, [
+                new UserError("Invalid email or password", "INVALID_CREDENTIALS")
+            ]);
+        }
+
+        // Demo seed user compatibility: যদি password "hashed_password_here" হয়,
+        // তবে "Password@123" বা "Admin@123" গ্রহণ করে автоматически BCrypt hash এ রূপান্তর করবে
+        var isPasswordValid = false;
+        if (user.PasswordHash == "hashed_password_here" && 
+            (input.Password == "Password@123" || input.Password == "Admin@123"))
+        {
+            user.PasswordHash = passwordHasher.HashPassword(input.Password);
+            await context.SaveChangesAsync();
+            isPasswordValid = true;
+        }
+        else
+        {
+            isPasswordValid = passwordHasher.VerifyPassword(input.Password, user.PasswordHash);
+        }
+
+        if (!isPasswordValid)
+        {
+            return new AuthPayload(null, null, [
+                new UserError("Invalid email or password", "INVALID_CREDENTIALS")
+            ]);
+        }
+
+        var roles = user.UserRoles.Select(ur => ur.Role?.Name ?? "").Where(r => !string.IsNullOrEmpty(r)).ToList();
+        var token = tokenService.GenerateAccessToken(user, roles);
+
+        return new AuthPayload(token, user, null);
+    }
+
     // ========== Post Mutations ==========
 
     /// <summary>
     /// নতুন Post তৈরি করা।
     /// 
-    /// শেখার পয়েন্ট: Input Type — CreatePostInput আলাদা type হিসেবে define করা হয়েছে
-    /// যাতে client কে clear structure দেওয়া যায়।
-    /// 
-    /// Payload Pattern — response এ post ও errors দুইটাই থাকে,
-    /// যাতে partial success handle করা যায়।
+    /// 🔐 [Authorize] — শুধু লগইন করা ব্যবহারকারী পোস্ট করতে পারবেন।
+    /// AuthorId ক্লায়েন্ট থেকে পাঠানোর প্রয়োজন নেই, JWT Token থেকে স্বয়ংক্রিয়ভাবে নেওয়া হয়।
     /// </summary>
+    [Authorize]
     public async Task<CreatePostPayload> CreatePost(
+        ClaimsPrincipal claimsPrincipal,
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
         CreatePostInput input)
     {
         await using var context = await contextFactory.CreateDbContextAsync();
 
-        // Validation
+        var currentUserId = claimsPrincipal.GetUserId();
+        var authorId = input.AuthorId ?? currentUserId;
+
+        if (authorId == null)
+            return new CreatePostPayload(null, [new UserError("Authentication required", "UNAUTHORIZED")]);
+
         var errors = new List<UserError>();
 
         if (string.IsNullOrWhiteSpace(input.Title))
@@ -55,37 +183,38 @@ public class Mutation
         if (!categoryExists)
             errors.Add(new UserError("Category not found", "NOT_FOUND", "categoryId"));
 
-        var authorExists = await context.Users.AnyAsync(u => u.Id == input.AuthorId);
-        if (!authorExists)
-            errors.Add(new UserError("Author not found", "NOT_FOUND", "authorId"));
-
-        if (errors.Count > 0)
+        if (errors.Any())
             return new CreatePostPayload(null, errors);
+
+        var slug = GenerateSlug(input.Title);
+        var baseSlug = slug;
+        var count = 1;
+        while (await context.Posts.AnyAsync(p => p.Slug == slug))
+        {
+            slug = $"{baseSlug}-{count++}";
+        }
 
         var post = new Post
         {
             Title = input.Title,
-            Slug = GenerateSlug(input.Title),
+            Slug = slug,
             Content = input.Content,
-            Excerpt = input.Excerpt,
+            Excerpt = input.Excerpt ?? (input.Content.Length > 200 ? input.Content[..200] + "..." : input.Content),
+            AuthorId = authorId.Value,
+            CategoryId = input.CategoryId,
             Status = input.Status ?? PostStatus.Draft,
-            AuthorId = input.AuthorId,
-            CategoryId = input.CategoryId
+            PublishedAt = (input.Status == PostStatus.Published) ? DateTime.UtcNow : null
         };
 
-        if (post.Status == PostStatus.Published)
-            post.PublishedAt = DateTime.UtcNow;
-
-        context.Posts.Add(post);
-
-        if (input.TagIds?.Count > 0)
+        if (input.TagIds != null && input.TagIds.Any())
         {
             foreach (var tagId in input.TagIds)
             {
-                context.PostTags.Add(new PostTag { PostId = post.Id, TagId = tagId });
+                post.PostTags.Add(new PostTag { PostId = post.Id, TagId = tagId });
             }
         }
 
+        context.Posts.Add(post);
         await context.SaveChangesAsync();
 
         var createdPost = await context.Posts
@@ -98,9 +227,11 @@ public class Mutation
     }
 
     /// <summary>
-    /// Post update করা — শুধু যেসব field পাঠানো হবে সেগুলোই update হবে।
+    /// Post update করা — শুধু পোস্টের লেখক বা Admin আপডেট করতে পারবেন।
     /// </summary>
+    [Authorize]
     public async Task<UpdatePostPayload> UpdatePost(
+        ClaimsPrincipal claimsPrincipal,
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
         [Service] ITopicEventSender eventSender,
         Guid id,
@@ -111,6 +242,17 @@ public class Mutation
 
         if (post == null)
             return new UpdatePostPayload(null, [new UserError("Post not found", "NOT_FOUND", "id")]);
+
+        var currentUserId = claimsPrincipal.GetUserId();
+        var isAdmin = claimsPrincipal.IsInRole("Admin");
+
+        // Authorization check: Only author or Admin can edit!
+        if (post.AuthorId != currentUserId && !isAdmin)
+        {
+            return new UpdatePostPayload(null, [
+                new UserError("You are not authorized to update this post", "FORBIDDEN")
+            ]);
+        }
 
         var wasPublished = post.Status == PostStatus.Published;
 
@@ -147,7 +289,7 @@ public class Mutation
             .Include(p => p.PostTags).ThenInclude(pt => pt.Tag)
             .FirstAsync(p => p.Id == id);
 
-        // 🔔 যদি post এইমাত্র publish করা হয়, তাহলে subscriber-দের notify করি
+        // 🔔 Subscription event publish if newly published
         if (!wasPublished && updatedPost.Status == PostStatus.Published)
         {
             await eventSender.SendAsync("PostPublished", updatedPost);
@@ -157,9 +299,11 @@ public class Mutation
     }
 
     /// <summary>
-    /// Post delete করা।
+    /// Post delete করা — শুধু পোস্টের লেখক বা Admin ডিলিট করতে পারবেন।
     /// </summary>
+    [Authorize]
     public async Task<DeletePostPayload> DeletePost(
+        ClaimsPrincipal claimsPrincipal,
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
         Guid id)
     {
@@ -169,6 +313,17 @@ public class Mutation
         if (post == null)
             return new DeletePostPayload(false, [new UserError("Post not found", "NOT_FOUND", "id")]);
 
+        var currentUserId = claimsPrincipal.GetUserId();
+        var isAdmin = claimsPrincipal.IsInRole("Admin");
+
+        // Authorization check: Only author or Admin can delete!
+        if (post.AuthorId != currentUserId && !isAdmin)
+        {
+            return new DeletePostPayload(false, [
+                new UserError("You are not authorized to delete this post", "FORBIDDEN")
+            ]);
+        }
+
         context.Posts.Remove(post);
         await context.SaveChangesAsync();
 
@@ -177,12 +332,23 @@ public class Mutation
 
     // ========== Comment Mutations ==========
 
+    /// <summary>
+    /// নতুন কমেন্ট যোগ করা — লগইন করা ইউজারের ID স্বয়ংক্রিয়ভাবে নেওয়া হবে।
+    /// </summary>
+    [Authorize]
     public async Task<AddCommentPayload> AddComment(
+        ClaimsPrincipal claimsPrincipal,
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
         [Service] ITopicEventSender eventSender,
         AddCommentInput input)
     {
         await using var context = await contextFactory.CreateDbContextAsync();
+
+        var currentUserId = claimsPrincipal.GetUserId();
+        var authorId = input.AuthorId ?? currentUserId;
+
+        if (authorId == null)
+            return new AddCommentPayload(null, [new UserError("Authentication required", "UNAUTHORIZED")]);
 
         var postExists = await context.Posts.AnyAsync(p => p.Id == input.PostId);
         if (!postExists)
@@ -192,7 +358,7 @@ public class Mutation
         {
             Content = input.Content,
             PostId = input.PostId,
-            AuthorId = input.AuthorId,
+            AuthorId = authorId.Value,
             ParentCommentId = input.ParentCommentId
         };
 
@@ -204,7 +370,7 @@ public class Mutation
             .Include(c => c.Post)
             .FirstAsync(c => c.Id == comment.Id);
 
-        // 🔔 Subscription event publish! Subscribe করা সব client কে notify করবে
+        // 🔔 Subscription event publish!
         await eventSender.SendAsync($"CommentAdded_{input.PostId}", createdComment);
 
         return new AddCommentPayload(createdComment, null);
@@ -213,20 +379,28 @@ public class Mutation
     // ========== Like Mutations ==========
 
     /// <summary>
-    /// Toggle Like — like করা থাকলে unlike করবে, না থাকলে like করবে।
+    /// Toggle Like — লগইন করা ইউজারের ভিত্তিতে লাইক/আনলাইক।
     /// </summary>
+    [Authorize]
     public async Task<ToggleLikePayload> ToggleLike(
+        ClaimsPrincipal claimsPrincipal,
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
         [Service] ITopicEventSender eventSender,
         Guid postId,
-        Guid userId)
+        Guid? userId = null)
     {
         await using var context = await contextFactory.CreateDbContextAsync();
 
-        var existingLike = await context.Likes
-            .FirstOrDefaultAsync(l => l.PostId == postId && l.UserId == userId);
+        var currentUserId = claimsPrincipal.GetUserId();
+        var effectiveUserId = userId ?? currentUserId;
 
-        var user = await context.Users.FindAsync(userId);
+        if (effectiveUserId == null)
+            return new ToggleLikePayload(false, "Authentication required");
+
+        var existingLike = await context.Likes
+            .FirstOrDefaultAsync(l => l.PostId == postId && l.UserId == effectiveUserId.Value);
+
+        var user = await context.Users.FindAsync(effectiveUserId.Value);
         var userDisplayName = user?.DisplayName ?? "Unknown";
 
         if (existingLike != null)
@@ -237,25 +411,29 @@ public class Mutation
 
             // 🔔 Like subscription event
             await eventSender.SendAsync($"PostLiked_{postId}",
-                new LikeNotification(postId, userId, userDisplayName, false, totalLikes));
+                new LikeNotification(postId, effectiveUserId.Value, userDisplayName, false, totalLikes));
 
             return new ToggleLikePayload(false, "Post unliked");
         }
 
-        var like = new Like { PostId = postId, UserId = userId };
+        var like = new Like { PostId = postId, UserId = effectiveUserId.Value };
         context.Likes.Add(like);
         await context.SaveChangesAsync();
         var totalLikesCount = await context.Likes.CountAsync(l => l.PostId == postId);
 
         // 🔔 Like subscription event
         await eventSender.SendAsync($"PostLiked_{postId}",
-            new LikeNotification(postId, userId, userDisplayName, true, totalLikesCount));
+            new LikeNotification(postId, effectiveUserId.Value, userDisplayName, true, totalLikesCount));
 
         return new ToggleLikePayload(true, "Post liked");
     }
 
     // ========== Category Mutations ==========
 
+    /// <summary>
+    /// শুধু Admin রোল থাকা ব্যবহারকারী নতুন Category তৈরি করতে পারবেন!
+    /// </summary>
+    [Authorize(Roles = new[] { "Admin" })]
     public async Task<Category> CreateCategory(
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
         CreateCategoryInput input)
@@ -278,6 +456,7 @@ public class Mutation
 
     // ========== Tag Mutations ==========
 
+    [Authorize]
     public async Task<CoreTag> CreateTag(
         [Service] IDbContextFactory<QuilllowDbContext> contextFactory,
         string name)
@@ -314,7 +493,7 @@ public record CreatePostInput(
     string Title,
     string Content,
     string? Excerpt,
-    Guid AuthorId,
+    Guid? AuthorId,
     Guid CategoryId,
     PostStatus? Status,
     List<Guid>? TagIds
@@ -332,7 +511,7 @@ public record UpdatePostInput(
 public record AddCommentInput(
     string Content,
     Guid PostId,
-    Guid AuthorId,
+    Guid? AuthorId,
     Guid? ParentCommentId
 );
 
@@ -344,9 +523,33 @@ public record CreateCategoryInput(
 
 // ========== Payload Types ==========
 
-public record CreatePostPayload(Post? Post, List<UserError>? Errors);
-public record UpdatePostPayload(Post? Post, List<UserError>? Errors);
-public record DeletePostPayload(bool Success, List<UserError>? Errors);
-public record AddCommentPayload(Comment? Comment, List<UserError>? Errors);
-public record ToggleLikePayload(bool IsLiked, string Message);
-public record UserError(string Message, string Code, string? Field);
+public record CreatePostPayload(
+    Post? Post,
+    IReadOnlyList<UserError>? Errors
+);
+
+public record UpdatePostPayload(
+    Post? Post,
+    IReadOnlyList<UserError>? Errors
+);
+
+public record DeletePostPayload(
+    bool Success,
+    IReadOnlyList<UserError>? Errors
+);
+
+public record AddCommentPayload(
+    Comment? Comment,
+    IReadOnlyList<UserError>? Errors
+);
+
+public record ToggleLikePayload(
+    bool IsLiked,
+    string Message
+);
+
+public record UserError(
+    string Message,
+    string Code,
+    string? Field = null
+);
