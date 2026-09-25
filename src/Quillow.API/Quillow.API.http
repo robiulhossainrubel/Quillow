@@ -1,0 +1,6 @@
+@Quillow.API_HostAddress = http://localhost:5049
+
+GET {{Quillow.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

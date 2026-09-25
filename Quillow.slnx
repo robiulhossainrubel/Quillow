@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Quillow.API/Quillow.API.csproj" />
+    <Project Path="src/Quillow.Core/Quillow.Core.csproj" />
+    <Project Path="src/Quillow.Infrastructure/Quillow.Infrastructure.csproj" />
+    <Project Path="src/Quillow.Services/Quillow.Services.csproj" />
+  </Folder>
+</Solution>
